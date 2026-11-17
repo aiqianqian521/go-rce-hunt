@@ -1,0 +1,66 @@
+name: test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Windows runner 控制台默认是 charmap 编码，脚本里的中文输出会抛 UnicodeEncodeError
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.9", "3.12"]
+        exclude:
+          # ubuntu-latest 已是 24.04，setup-python 没有 3.9 构建；
+          # Linux 上的 3.9 覆盖交给下面补的 ubuntu-22.04 这一路
+          - os: ubuntu-latest
+            python: "3.9"
+        include:
+          - os: ubuntu-22.04
+            python: "3.9"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 显示 Python 版本
+        run: python --version
+
+      - name: 规则自测（含变异测试：改坏规则必须让断言失败）
+        run: python scripts/test_scan_sinks.py
+
+      - name: 扫描器冒烟（正样本必须真的被扫到并产出候选）
+        shell: bash
+        run: |
+          # assets/selftest 里是 .go.txt 语料，扫描器只认 .go，所以先复制成 .go 再扫
+          tmp=$(mktemp -d)
+          for f in assets/selftest/pos_*.go.txt; do
+            cp "$f" "$tmp/$(basename "$f" .txt)"
+          done
+          out=$(python scripts/scan_sinks.py "$tmp" 2>&1)
+          echo "$out"
+          pos=$(ls assets/selftest/pos_*.go.txt | wc -l)
+          n=$(echo "$out" | sed -n 's/.*\[\=\] \([0-9]*\) files scanned.*/\1/p')
+          c=$(echo "$out" | sed -n 's/.*files scanned, \([0-9]*\) candidates.*/\1/p')
+          if [ "${n:-0}" -ne "$pos" ]; then
+            echo "::error::扫描文件数 $n != 正样本数 $pos（扫描器没真的扫到语料）"
+            exit 1
+          fi
+          if [ "${c:-0}" -lt 1 ]; then
+            echo "::error::正样本未产出任何候选"
+            exit 1
+          fi
+          echo "扫描 $n 个文件，产出 $c 个候选"
+
+      - name: 检索器冒烟
+        run: python scripts/kb_retrieve.py --list
